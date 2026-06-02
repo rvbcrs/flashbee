@@ -10,15 +10,12 @@ of recent strikes, and a big red `SHELTER` warning when a strike lands within
 > [gokux's original "Flash Bee"](https://www.instructables.com/Flash-Bee-Handheld-Lighting-Sensing-and-Ranging-De/)
 > (Instructables). haklein's version targets the Seeed XIAO + Round Display; this
 > one re-targets it to the **Waveshare ESP32-S3-Touch-AMOLED-1.75** (1.75″ CO5300
-> QSPI AMOLED, CST9217 capacitive touch) with a custom parametric, 3D-printable
-> case (build123d) and further firmware changes. Full credit for the original
-> concept, mechanical design, and photos goes to **gokux**, and to **haklein** for
-> the PlatformIO port + safety-critical AS3935 datasheet fixes this builds on —
-> see [Credits](#credits).
->
-> ⚠️ **Work in progress:** the detailed Hardware / wiring sections further down
-> still describe the earlier Seeed XIAO + Round Display target and are being
-> updated for the AMOLED board.
+> QSPI AMOLED, CST9217 capacitive touch), adds a custom parametric 3D-printable
+> case (build123d), and rebuilds the firmware as a modular `fb_*` stack (display,
+> touch, audio, power, networking/MQTT, RTC). Full credit for the original concept,
+> mechanical design, and photos goes to **gokux**, and to **haklein** for the
+> PlatformIO port + safety-critical AS3935 datasheet fixes this builds on — see
+> [Credits](#credits).
 
 ## Credits
 
@@ -26,320 +23,296 @@ of recent strikes, and a big red `SHELTER` warning when a strike lands within
   <https://www.instructables.com/Flash-Bee-Handheld-Lighting-Sensing-and-Ranging-De/>
 - PlatformIO firmware port + safety-critical AS3935 datasheet fixes this is
   based on — **haklein**: <https://github.com/haklein/flashbee>
-- AS3935 sensor: [Seeed Grove Lightning Sensor AS3935](https://www.seeedstudio.com/Grove-Lightning-Sensor-AS3935-p-5603.html)
-- Display stack:
-  [Seeed_GFX](https://github.com/Seeed-Studio/Seeed_GFX) (TFT_eSPI fork) and
-  [Seeed_Arduino_RoundDisplay](https://github.com/Seeed-Studio/Seeed_Arduino_RoundDisplay)
+- Lightning sensor: AMS **AS3935**; modules sold as CJMCU-3935 / WCMCU-3935 /
+  Seeed [Grove AS3935](https://www.seeedstudio.com/Grove-Lightning-Sensor-AS3935-p-5603.html)
+- Host board: [Waveshare ESP32-S3-Touch-AMOLED-1.75](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75)
+
+> **⚠️ Safety.** This is a hobby device. Do **not** use it as your sole basis for
+> deciding whether it is safe to be outdoors. The AS3935 is a statistical
+> single-antenna detector with ±1-bin distance uncertainty and well-known
+> disturber / false-positive behaviour. When in doubt, follow the
+> [NWS 30/30 rule](https://www.weather.gov/safety/lightning) and official weather
+> advisories. The trustworthy output is the `!! SHELTER !!` warning — treat the
+> km number as a best-effort estimate.
 
 ## Hardware
 
-| Part                                        | Role                                   |
-|---------------------------------------------|----------------------------------------|
-| Seeed XIAO ESP32-C3 or ESP32-C6             | MCU (two PIO envs — C6 via pioarduino) |
-| Seeed Round Display v1.1 (GC9A01, 240×240)  | UI (SPI) + capacitive touch + battery  |
-| Seeed Grove AS3935                          | Lightning detection (I²C, addr `0x03`) |
+The device is **one Waveshare dev board + one sensor module + a battery + a
+3D-printed case**. The board already bundles the display, touch, power management,
+audio and RTC, so the only thing you wire up is the AS3935.
 
-Pin assignments use the XIAO silkscreen labels (D0…D10), which map to
-different underlying GPIOs on C3 vs C6 but sit in the same physical
-positions on the board. `SDA = D4`, `SCL = D5`; SPI for the display is
-configured via Setup501 in Seeed_GFX.
+| Part | Role |
+|------|------|
+| **Waveshare ESP32-S3-Touch-AMOLED-1.75** | ESP32-S3 (16 MB flash, OPI PSRAM); 1.75″ **CO5300** AMOLED (466×466, round, QSPI); **CST9217** capacitive touch; **AXP2101** PMU + LiPo charger; **ES8311** audio codec + speaker; **PCF85063** RTC |
+| **AS3935 module** (CJMCU-3935 / Grove AS3935) | Franklin lightning sensor on its own I²C bus (see [Wiring](#wiring--as3935-sensor)) |
+| **LiPo pouch** — HY103450 (10 × 34 × 50 mm) | Battery; charged over the board's USB-C via the AXP2101 |
+| **3D-printed case** | Two-part snap-fit enclosure (see [3D-printed case](#3d-printed-case)) |
 
-### Extra wire: AS3935 `INT` → XIAO `D2`
+## Wiring — AS3935 sensor
 
-The Instructables assembly already asks you to cut the Grove connector
-off the module and solder direct bridges for 3V3, GND, SDA and SCL.
-**Add one more wire:** from the AS3935 module's `INT` pad to XIAO
-**D2 (GPIO4)**. This lets the firmware measure the antenna's LC-tank
-resonance and pick the correct `TUN_CAP` value automatically — without
-it, every distance reading is biased. Override the pin with
-`-DAS3935_INT_PIN=<n>` if D2 isn't convenient for your wiring.
+The only soldering is the AS3935 module to a spare header. It runs on its **own
+I²C bus** (`Wire`), separate from the board's onboard peripherals (`Wire1`), at
+100 kHz, address `0x03`:
 
-### Round Display v1.1 KE switch
+| AS3935 pin | → ESP32-S3 |
+|------------|------------|
+| VCC        | 3V3        |
+| GND        | GND        |
+| SDA        | **GPIO 17** |
+| SCL        | **GPIO 18** |
+| INT        | **GPIO 16** |
 
-Per the [Seeed wiki](https://wiki.seeedstudio.com/seeedstudio_round_display_usage/),
-Round Display v1.1 added a 2-bit DIP switch ("KE") in the middle
-of the microSD-slot area. Its two positions mean:
+The **INT** wire is essential: the firmware is fully interrupt-driven (no
+polling), and the boot-time [antenna calibration](#first-time-setup--antenna-calibration)
+measures the LC-tank resonance on this pin. Override it at build time with
+`-DAS3935_INT_PIN=<n>`.
 
-- **KE ON** — A0 connects to the onboard battery-voltage divider
-  (R28/R29 → VBAT/2), and D6 connects to the backlight MOSFET
-  gate. This is the configuration the firmware is built around:
-  the settings screen shows `BAT x.xx V  NN%`, and the inactivity
-  timeout cuts the backlight fully.
-- **KE OFF** — A0 and D6 are electrically disconnected from the
-  display module's circuits and become plain XIAO GPIOs for the
-  user to wire as they like. With the switch in this position the
-  backlight stays on permanently regardless of firmware state
-  (still gets `DISPOFF + SLPIN` so the pixels go black), and the
-  battery reading shows `BAT --`.
+### Full pin map
 
-Firmware never drives A0 (it's an analog input when KE is on, and
-the user's free GPIO when KE is off — either way, actively driving
-it would be wrong). D6 is driven for backlight. Override with
-`-DTFT_BL_PIN=<n>` if you wire it differently.
+| GPIO            | Signal                                              |
+|-----------------|-----------------------------------------------------|
+| 4 / 5 / 6 / 7   | AMOLED QSPI data D0–D3                              |
+| 38              | AMOLED QSPI SCLK                                    |
+| 12              | AMOLED QSPI CS                                      |
+| 39              | AMOLED reset                                        |
+| 15 / 14         | Onboard I²C (`Wire1`) SDA / SCL                     |
+| 11 / 40         | Touch INT / RST (CST9217)                           |
+| 17 / 18         | AS3935 I²C (`Wire`) SDA / SCL                       |
+| 16              | AS3935 INT                                          |
+| 42 / 9 / 45 / 8 / 10 | Audio I²S MCLK / BCLK / LRCLK / DOUT / DIN (ES8311) |
+| 46              | Audio amplifier enable                              |
 
-> **Safety disclaimer.** This is a hobby device. Do **not** use it as your
-> sole basis for deciding whether it is safe to be outdoors. The AS3935 is
-> a statistical single-antenna detector with ±1 bin distance uncertainty
-> and well-known disturber/false-positive behavior. When in doubt, follow
-> the [NWS 30/30 rule](https://www.weather.gov/safety/lightning) and
-> official weather advisories.
+Two I²C buses:
 
-## Build
+- **`Wire`** — GPIO 17/18, 100 kHz: AS3935 `0x03`.
+- **`Wire1`** — GPIO 15/14, 400 kHz: CST9217 touch `0x5A`, AXP2101 PMU, ES8311
+  codec, PCF85063 RTC `0x51`. (`pio run -e s3scan` scans this bus.)
 
-Requires [PlatformIO Core](https://platformio.org/install/cli).
+## Build & flash
+
+Requires [PlatformIO Core](https://platformio.org/install/cli). The firmware is
+the modular `fb_*.cpp` stack, built by the `s3` environment:
 
 ```bash
-pio run -e seeed_xiao_esp32c3            # compile
-pio run -e seeed_xiao_esp32c3 -t upload  # flash via USB-C
-pio device monitor -b 115200             # serial log
+pio run -e s3                  # build the full firmware
+pio run -e s3 -t upload        # flash over USB-C
+pio device monitor -b 115200   # serial log
 ```
 
-The first build fetches `Seeed_GFX` and `Seeed_Arduino_RoundDisplay` from
-GitHub into `.pio/libdeps/`.
+The first build fetches WiFiManager, PubSubClient, **SensorLib** (pinned) and
+**XPowersLib** (pinned) into `.pio/libdeps/`. **Arduino_GFX** is vendored in
+`lib/` (it carries a manifest-name patch PlatformIO needs); **ES8311** is vendored
+too.
 
-### Why `-DBOARD_SCREEN_COMBO=501`?
-
-Seeed_GFX's `Dynamic_Setup.h` selects the pinout/driver via the
-`BOARD_SCREEN_COMBO` macro. The canonical Arduino-IDE workflow drops a
-`driver.h` into the sketch folder, which Seeed_GFX picks up with
-`__has_include("driver.h")`. Under PlatformIO the project's `include/`
-directory is **not** on the include path when library source files
-(inside `Seeed_GFX/`) are compiled, so that `__has_include` silently
-returns false and the library falls through to combo `666` — a CI stub
-with the wrong pinout for the round display. The build still succeeds
-but the display stays dark on hardware. Defining the macro via
-`build_flags` makes it visible to every compilation unit uniformly.
-
-## Layout
-
-```
-platformio.ini          # board, libs, build_flags
-src/main.ino            # single-file firmware
-```
+| Env | Board | Purpose |
+|-----|-------|---------|
+| `s3` | esp32-s3-devkitc-1 (S3, 16 MB, PSRAM) | **Full firmware** (AMOLED) |
+| `s3test` | esp32-s3-devkitc-1 | Standalone AS3935 serial test — strikes to the monitor, no display |
+| `s3scan` | esp32-s3-devkitc-1 | I²C bus scanner |
+| `seeed_xiao_esp32c3` / `…c6` | Seeed XIAO | **Legacy** — builds the original single-file `main.ino` for haklein's Seeed XIAO + Round Display target, *not* the `fb_*` firmware |
 
 ## What it shows
 
-Main screen:
+The UI has **four themes** — Legacy, Aurora, Neon, Watch — swappable on the
+Settings screen and saved to flash, and **two screens** you switch with a
+horizontal swipe.
 
-- **Big yellow number** — estimated distance in km, or `OVERHEAD` / `>40` /
+**Main screen**
+
+- **Big number** — estimated distance in km, or `OVERHEAD` / `>40` /
   `-- distance unknown`.
-- **Arc gauge** — last-strike energy (0–21 bit AS3935 word) mapped 0–100 %.
-- **Inward-pulsing concentric rings** — "listening" indicator. Purely
-  radial (the AS3935 is non-directional — any rotating element would
-  falsely imply bearing capability). Green-teal normally, red-amber
-  during the shelter window.
-- **Strikes / Energy** — running count and last-strike energy.
-- **Energy history** — 20-slot ring-buffer bar chart. Labelled `(stale)`
-  once the last strike is more than 5 min old.
-- **Status line under the title** — `OUT/IN WD:n SR:n` (current AFE mode
-  + filter levels). Turns amber when filters have tightened beyond
-  mid-range, red `ENV TOO NOISY` when the noise floor has hit the
-  hardware ceiling and the chip is no longer operating within spec.
-- **`!! SHELTER !!` overlay** — blinks red/amber when a strike is
-  detected within ~10 km (close threshold per NWS 30/30 rule). The
-  right-side footer swaps to `SHELTER m:ss` counting up from the
-  last close strike. Clears automatically 30 minutes after the
-  last close strike.
-- **`SENSOR LOST` overlay** — shown when I²C has failed 8+ times in a
-  row; the firmware keeps retrying `initAS3935()` every 3 s until
-  the sensor comes back.
+- **Energy gauge** — last-strike energy (AS3935 21-bit word).
+- **Inward-pulsing rings** — a "listening" indicator. Purely radial: the AS3935
+  is non-directional, so nothing implies bearing.
+- **Strikes / energy history** — running count and a recent-energy bar chart
+  (marked `(stale)` once the last strike is >5 min old).
+- **AS3935 status line** — `OUT/IN WD:n SR:n` (AFE mode + filter levels). Turns
+  amber as filters tighten, red `ENV TOO NOISY` when the noise floor hits the
+  hardware ceiling and readings are no longer in-spec.
+- **`!! SHELTER !!` overlay** — blinks when a strike is within ~10 km, with a
+  count-up timer; clears automatically 30 min after the last close strike.
+- **`SENSOR LOST` overlay** — shown after repeated I²C failures; the firmware
+  keeps retrying until the sensor returns.
 
-Settings screen (swipe horizontally):
+**Settings screen** (swipe horizontally) — INDOOR/OUTDOOR AFE gain, sensitivity
+profile (STORM / NORMAL / NOISY), sound volume, theme, screen-blank timeout,
+light-sleep timeout, RESET filters, **TUNE** (re-run antenna calibration), TEST,
+and a live battery readout from the AXP2101.
 
-- **INDOOR / OUTDOOR** — AFE gain toggle, persisted to NVS.
-- **SCREEN** — backlight inactivity timeout (30 s … NEVER).
-- **SLEEP** — light-sleep inactivity timeout (5 min … NEVER). Wakes
-  on strike, disturber (silent), or any touch.
-- **RESET FILTERS** — restores NF/WD/SR to defaults, clears AS3935
-  lightning statistics via the `CL_STAT` toggle. Does *not* clear
-  the shelter timer (safety: no UI-level "pretend it's safe" button).
-- **Footer** — `BAT x.xx V  NN%` live battery readout (Round Display
-  v1.1 KE switch ON) and `NF  WD  SR` current AS3935 filter state.
+## Web UI, MQTT & Home Assistant
 
-## Power management
+On first boot with no saved WiFi, the device opens a non-blocking captive-portal
+AP **`FlashBee-setup`** (WiFiManager). Join it to enter your WiFi and, optionally,
+an MQTT broker. After that it's reachable at **`http://flashbee.local`**:
 
-Three tiers, all individually configurable from the settings screen
-and persisted across power cycles:
+| Route | Purpose |
+|-------|---------|
+| `GET /` | Single-page web app — Live / History / Settings tabs |
+| `GET /api` | JSON: current state + strike history + config |
+| `GET /strikes.csv` | Raw strike log (CSV) |
+| `POST /save` | Save MQTT broker host / port / user / pass |
+| `POST /resetwifi` | Wipe WiFi credentials and reboot to the setup AP |
 
-1. **Interrupt-driven AS3935.** `D2` receives a hardware IRQ from the
-   module (see wiring section above). The firmware never polls — it
-   reacts in microseconds and the I²C bus is quiet between events.
-2. **Backlight off (Tier 2).** After `SCREEN` minutes of no touches
-   and no strikes, `D6` goes low and the GC9A01 enters `DISPOFF` +
-   `SLPIN`. Disturbers / noise-floor events don't reset this timer
-   — they still get processed silently, they just don't wake the
-   display.
-3. **CPU light sleep (Tier 3).** After `SLEEP` minutes more, the
-   ESP32 enters `esp_light_sleep_start()`. Wake sources: AS3935 INT
-   rising (strike/disturber) or touch going low. A strike wakes the
-   display; a plain disturber processes silently and goes back to
-   sleep. USB-CDC drops during sleep and re-enumerates on wake.
+With a broker configured it publishes **Home Assistant discovery** for seven
+entities — distance, nearest, energy, strike count, battery %, RSSI, and a
+`shelter` binary sensor — under `flashbee/<id>/…`, with a 10 s state heartbeat
+plus an immediate publish on every strike.
 
-Estimated current draw on the Trustfire 10440 (300 mAh):
-
-| State              | ~Current | Runtime on 280 mAh usable |
-|--------------------|----------|---------------------------|
-| Main UI active     | 50 mA    | 5.5 h                     |
-| Screen off         | 28 mA    | 10 h                      |
-| Light sleep        | 3–5 mA   | 55–90 h                   |
+Strikes are logged to **LittleFS** (`/strikes.csv`, `epoch,km,energy`) with a
+64-entry in-RAM ring. Timestamps come from the **PCF85063 RTC**, which is set
+from **NTP** once online and kept in UTC.
 
 ## First-time setup — antenna calibration
 
-After the first flash, open the serial monitor before plugging in (or
-hit the reset button after plugging in) and watch for:
+The AS3935's antenna LC tank must be trimmed (`TUN_CAP`) to its board-specific
+value; the factory default is usually a few % off, which biases every distance
+reading. The firmware **auto-runs the calibration sweep on every boot** — you can
+also re-run it from the **TUNE** tap on the Settings screen, or by typing `tune`
+on the serial console:
 
-```
-[tune] no saved antenna calibration.
-[tune] send 'tune' on serial to calibrate now.
-```
+1. Issue `PRESET_DEFAULT` + `CALIB_RCO`.
+2. Route the LC oscillator to the **INT pin** (GPIO 16), divided down to ~3906 Hz.
+3. Sweep `TUN_CAP` 0–15, counting edges per step.
+4. Pick the value closest to 3906 Hz (±3.5 % tolerance) and save it to flash (NVS).
 
-Type `tune` and hit enter within the 5-second window. The firmware:
-
-1. Issues `PRESET_DEFAULT` + `CALIB_RCO` to the AS3935.
-2. Sets `DISP_LCO` bit and `LCO_FDIV = ÷128` — routes the LC-tank
-   oscillator to the AS3935 `INT` pin, divided down to ~3906 Hz.
-3. Sweeps `TUN_CAP` from 0 to 15, counting rising edges on the
-   XIAO GPIO for 200 ms per step.
-4. Picks the value closest to 3906 Hz, saves it to NVS (via
-   `Preferences`), and continues into normal detector mode with
-   that `TUN_CAP` applied.
-
+The screen shows a live progress bar and a `TUNED` / `OUT OF RANGE` summary.
 Serial output looks like:
 
 ```
-TUN_CAP= 0 -> 3863 Hz (-43)
-TUN_CAP= 1 -> 3885 Hz (-21)
-TUN_CAP= 2 -> 3903 Hz  (-3)
-TUN_CAP= 3 -> 3921 Hz (+15)
-...
-best: TUN_CAP=2 @ 3903 Hz (dev -3, WITHIN TOL)
+TUN_CAP= 8 -> 3900 Hz  (-6)
+TUN_CAP= 9 -> 3906 Hz   (0)
+best: TUN_CAP=9 @ 3906 Hz (WITHIN TOL)
 ```
 
-The screen shows a live progress bar during the sweep and a summary
-panel at the end (`TUNED` green, or `OUT OF RANGE` red if nothing on
-the sweep lands within ±3.5 %).
+If the sweep sees **zero edges** (`check INT wire`), the AS3935 `INT` → GPIO 16
+wire is missing or on a different pin, and the detector falls back to the
+compile-time default — it still works, but distance estimates use the untuned LC
+tank.
 
-**To re-calibrate later:** on any subsequent boot there's a 1.5-second
-window right after the AS3935 init screen where `tune` will retrigger
-the sweep. Hit reset, type `tune` on serial, done.
+## Power management
 
-**If the sweep fails with `NO SIGNAL` / `check INT wire`:** the
-firmware saw zero edges on `AS3935_INT_PIN`. Either the jumper from
-the AS3935 module's `INT` pad isn't connected, or it's on a different
-GPIO than D2. Without that wire the tune cannot run and the firmware
-falls back to the compile-time default (`AS3935_TUN_CAP`, 0 unless
-overridden) — the detector still works, but distance estimates will
-be whatever the out-of-the-box LC tank produces.
+- **Interrupt-driven** AS3935 (GPIO 16 IRQ) — no polling; the I²C bus is quiet
+  between events.
+- **Display timeout** (default 2 min; 30 s … NEVER) blanks the AMOLED via the
+  CO5300 panel. Disturber / noise events are still processed silently and don't
+  wake the screen.
+- **Light sleep** (default NEVER; 5 min … 2 h) — `esp_light_sleep_start()`,
+  waking on an AS3935 INT (strike), a touch, or a 1 h timer.
+- Battery voltage / percent are read from the **AXP2101** every 2 s; charge over
+  USB-C.
 
-## Safety-critical fixes vs. the Instructables original
+Runtime depends on the cell (the case fits an HY103450 LiPo pouch); the AMOLED +
+ESP32-S3 draw noticeably more than the original tiny-cell build, so size the pack
+accordingly.
 
-The original sketch was reviewed twice (once by Claude, once by Codex)
-against the AS3935 datasheet (rev 1.07 §8.10–§8.11). The import commit
-is kept intact at `7707720` so the deltas are traceable. Fix commit
-`107898d` addresses the following:
+## 3D-printed case
 
-### Accuracy of the distance readout
+A fully parametric **build123d** model — [`cad/flashbee_case.py`](cad/flashbee_case.py) —
+for a two-part snap-fit handheld enclosure (round display head + grip/battery body
++ antenna nub), designed around the Waveshare board.
 
-- **AFE gain byte was encoded wrong.** `AFE_GB` lives in `REG0x00[5:1]`,
-  so the 5-bit field value has to be shifted one bit up before being
-  written to the register. The original wrote `0b00010010` (0x12) when
-  aiming for the indoor encoding `0b10010` — which placed `0b01001` = 9
-  into the field, outside the datasheet's valid `{14 outdoor, 18
-  indoor}` pair. Fix: use `(0b01110 << 1) = 0x1C` for outdoor (new
-  default — this is a handheld) or `(0b10010 << 1) = 0x24` for indoor.
-  Override at build time with `-DAS3935_AFE_GB=AFE_GB_INDOOR`.
-- **`PRESET_DEFAULT` + `CALIB_RCO` never ran.** The original skipped
-  both direct commands, so the internal RCO timebase used to measure
-  strike-pulse energy was uncalibrated and distance estimates were
-  therefore unspecified. `initAS3935()` now issues both on every init
-  and verifies `TRCO_CALIB_DONE` / `SRCO_CALIB_DONE` (bit 7) plus the
-  corresponding `_NOK` bit (bit 6) in regs 0x3A/0x3B before proceeding.
-- **Antenna `TUN_CAP` was never set.** Reg 0x08 [3:0] controls the LC
-  tank trim; the factory-tuned value is board-specific. The firmware
-  now runs a built-in sweep (see
-  [First-time setup — antenna calibration](#first-time-setup--antenna-calibration))
-  and stores the result in NVS.
-- **Distance value `0x00` was coerced to `OVERHEAD`.** The datasheet
-  only defines `0x01` (overhead) and `0x3F` (out of range); `0x00`
-  is not a valid distance output. The original displayed the
-  scariest-possible reading for an undefined input. Now it shows
-  `-- distance unknown`.
+**Generate the STLs** (written to `cad/out/`):
 
-### Robustness during a storm
+```bash
+cd cad
+python3 -m venv .venv && .venv/bin/pip install build123d   # first time only
+FB_SHOW=0 .venv/bin/python flashbee_case.py                # headless export
+# (omit FB_SHOW=0 to also push a live preview to the OCP CAD Viewer)
+```
 
-- **Noise-floor ratchet only went up.** `INT_NH` caused `NF` to
-  increment (stricter) but nothing ever decremented it, so a minute
-  of nearby EMI could permanently deafen the detector for the rest
-  of the session. `lowerNoiseFloor()` now decays `NF` by one step
-  every 60 s of quiet.
-- **High-noise fault was hidden.** Datasheet: `INT_NH` means the
-  device cannot operate properly under the current input noise.
-  The original treated it as "turn up the filter and keep going".
-  When `NF` reaches the hardware maximum and `INT_NH` still fires,
-  the UI now shows `ENV TOO NOISY` in red so the user knows the
-  readings are no longer trustworthy.
-- **No I²C error detection.** All reads blindly returned `0xFF` on
-  failure, and `0xFF & 0x0F == 0x0F` didn't match any of the three
-  interrupt branches — so a wedged bus caused silent permanent
-  deafness. I²C calls now propagate a `bool` result; after 8
-  consecutive failures the sensor is marked lost and the `SENSOR
-  LOST` overlay appears. `Wire.setTimeOut(50)` prevents bus hangs
-  from stalling the MCU during ESD events.
-- **No stall watchdog.** If the AS3935 wedged (ESD, brownout),
-  nothing noticed. A re-init fires automatically after 10 min of
-  zero interrupts of any kind.
+Exported parts — each as `.stl` + `.step`, plus a combined `assembly.step`:
 
-### Code clarity
+- **`front_shell`** — bezel / lid (holds the AMOLED glass)
+- **`back_shell`** — tub (battery + sensor compartment)
+- **`plunger`** ×2 — side buttons
+- **`sensor_pin`** ×2 — AS3935 hold-down pins
 
-- `increaseSensitivity()` / `decreaseSensitivity()` were named
-  *opposite* to what they actually did relative to the datasheet
-  (higher `WDTH`/`SREJ` = **less** sensitive per §8.4). Renamed to
-  `tightenFilters()` / `loosenFilters()`.
-- Every AS3935 register, field, and bit now has a named symbol;
-  no magic `0x01`/`0x02`/`0x03` scattered through the logic.
-- Reg `0x02` writes now preserve `CL_STAT_EN` / `CL_STAT` in
-  bits [7:6]; the original blind full-byte write clobbered them.
+**Printing & assembly**
 
-### Hardware validation status
+- Print `front_shell`, `back_shell`, 2× `plunger`, 2× `sensor_pin`. ABS or PETG;
+  the shells print open-side / floor down.
+- The two shells **snap together** (tongue-and-groove rim with click detents).
+- The **AMOLED glass** drops into the front bezel pocket and is captured by the
+  lip when the shells close.
+- The **AS3935 board** sits on two bosses in the back; push a `sensor_pin`
+  through each mount hole into the boss. The pins are sized to **slide in and be
+  fixed with a drop of CA glue** (small FDM holes vary too much for a reliable
+  friction fit).
+- The **LiPo** sits in the grip; a low rib on the lid holds it down (its leads
+  run underneath, so it rides a little high).
+- The **USB-C** port and side buttons have openings on the rim; the `plunger`s
+  transmit the button presses.
 
-All of the above datasheet-correctness fixes have been bench-tested
-on a real XIAO ESP32-C6 + Seeed Round Display v1.1 + Grove AS3935
-module. What works on real silicon:
+The large **vendor reference models** (the board / sensor / battery `.step`,
+`.dwg`, `.pdf`) are **not** committed — they're large and third-party. The case
+and STLs build without them; they're only needed for the optional "ghost"
+assembly preview (`FB_SHOW=1`). Download them from the
+[Waveshare wiki](https://www.waveshare.com/wiki/ESP32-S3-Touch-AMOLED-1.75) and
+the sensor/battery vendors and drop them in `cad/` if you want the preview.
 
-- AS3935 responds to I²C at `0x03`, `PRESET_DEFAULT` + `CALIB_RCO`
-  complete successfully, TRCO/SRCO done-bits verify clean.
-- Antenna auto-tune sweep runs end-to-end and picks a valid
-  `TUN_CAP` within the ±3.5 % tolerance window. One tested module
-  landed at `TUN_CAP=9 @ 3900 Hz` (0.15 % off target) — the
-  datasheet factory default of `TUN_CAP=0` would have been 2.8 %
-  off, which is why the sweep matters.
-- Interrupt-driven event handling catches `INT_L`, `INT_D`, and
-  `INT_NH` with no missed events under normal load.
-- I²C fault-streak detection trips `SENSOR LOST` after 8
-  consecutive failures; re-init retry at 3 s cadence recovers.
-- Touch + swipe gesture classification, NVS persistence of AFE
-  mode / tune cap / timeouts, backlight off at inactivity, and
-  light-sleep wake on touch or AS3935 INT have all been exercised.
+## Repository layout
 
-What is still open:
+```
+platformio.ini          # build environments, flags, lib_deps
+src/fb_*.{h,cpp}         # modular firmware: as3935, display, gfx, touch, audio,
+                         #   power, net (web/MQTT), time (RTC/NTP)
+src/as3935_test.cpp      # standalone AS3935 serial test  (env s3test)
+src/i2c_scan.cpp         # I²C scanner                     (env s3scan)
+src/main.ino             # legacy single-file firmware     (Seeed XIAO envs)
+lib/Arduino_GFX/         # vendored display lib (manifest-name patch)
+lib/ES8311/              # vendored audio-codec lib
+cad/flashbee_case.py     # parametric build123d enclosure
+cad/dimensions.md        # measured component dimensions
+```
 
-1. **No real CG strike observed yet.** All live data so far is
-   indoor EMI (pellet heater ignition, PV inverter, LED drivers,
-   etc.), which the AS3935 classifies as a mix of disturbers and
-   "close strikes" with `d = 0x01` (overhead). This is expected
-   indoor behaviour per the datasheet — the sensor is designed
-   for outdoor open-air operation. The device needs a real
-   thunderstorm before the distance readout can be cross-checked
-   against [Blitzortung](https://www.blitzortung.org/).
-2. The reviewer critique stands that a single-antenna detector
-   produces **statistical** distance to the *head of the storm*,
-   not range to the individual strike that triggered the IRQ.
-   Do not treat the displayed number as a ranging result you
-   would stake a decision on. The `!! SHELTER !!` overlay is the
-   trustworthy output; the km number underneath is a best-effort
-   estimate.
-3. Battery runtime estimates in the Power management section are
-   calculated, not yet measured against the real 10440 cell.
+## AS3935 datasheet-correctness fixes
+
+These fixes are inherited from [haklein's port](https://github.com/haklein/flashbee),
+where the original Instructables sketch was reviewed against the AS3935 datasheet
+(rev 1.07 §8.10–§8.11). The `fb_as3935` driver here carries them forward:
+
+**Distance accuracy**
+
+- **AFE gain byte was encoded wrong.** `AFE_GB` is `REG0x00[5:1]`, so the 5-bit
+  field must be shifted up one bit. The original wrote `0x12` aiming for the
+  indoor code `0b10010`, which actually placed `9` into the field — outside the
+  valid `{14 outdoor, 18 indoor}` pair. Now uses `(0b01110<<1)=0x1C` outdoor
+  (default — this is a handheld) or `(0b10010<<1)=0x24` indoor.
+- **`PRESET_DEFAULT` + `CALIB_RCO` never ran**, so the RCO timebase used to
+  measure strike energy was uncalibrated. Both now run on every init, with
+  `TRCO`/`SRCO` done-bits verified.
+- **Antenna `TUN_CAP` was never set** — now auto-tuned (see
+  [calibration](#first-time-setup--antenna-calibration)) and stored in NVS.
+- **Distance `0x00` was coerced to `OVERHEAD`.** The datasheet only defines
+  `0x01` (overhead) and `0x3F` (out of range); `0x00` is undefined, so it now
+  shows `-- distance unknown` instead of the scariest reading.
+
+**Robustness during a storm**
+
+- **Noise-floor ratchet only went up** — a minute of EMI could permanently
+  deafen the detector. `NF` now decays one step per 60 s of quiet.
+- **High-noise fault was hidden.** When `NF` hits maximum and `INT_NH` still
+  fires, the UI shows `ENV TOO NOISY` so you know readings aren't trustworthy.
+- **No I²C error detection** — reads blindly returned `0xFF`. Calls now propagate
+  a result; after 8 consecutive failures the sensor is marked lost (`SENSOR
+  LOST`), and `Wire.setTimeOut(50)` prevents bus hangs during ESD events.
+- **No stall watchdog** — a re-init now fires after 10 min of zero interrupts.
+
+**Clarity**
+
+- `increaseSensitivity()`/`decreaseSensitivity()` were named *opposite* to their
+  datasheet effect (higher `WDTH`/`SREJ` = less sensitive) → renamed
+  `tightenFilters()`/`loosenFilters()`.
+- Every register/field/bit has a named symbol; reg `0x02` writes preserve
+  `CL_STAT_EN`/`CL_STAT` (the original clobbered them).
+
+> These datasheet-correctness fixes were bench-validated on the original Seeed
+> XIAO + Round Display + Grove AS3935 hardware (haklein); this port reuses the
+> same `fb_as3935` driver unchanged, on a new host board. **No real cloud-to-
+> ground strike has been cross-checked yet** — live data so far is indoor EMI,
+> which the AS3935 reports as a mix of disturbers and overhead "strikes"
+> (expected indoors). Treat `!! SHELTER !!` as the trustworthy output and the km
+> number as a best-effort estimate.
 
 ## License
 
