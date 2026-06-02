@@ -1,0 +1,41 @@
+# ── PlatformIO build output ───────────────────────────────────────────
+.pio/
+
+# ── Python (CAD: build123d / OCP CAD Viewer) ──────────────────────────
+cad/.venv/
+**/__pycache__/
+*.pyc
+
+# ── Generated CAD exports (regenerate: python cad/flashbee_case.py) ────
+cad/out/
+
+# ── Large vendor / original reference CAD models — NOT redistributed ──
+# flashbee_case.py imports these only for the OPTIONAL detailed ghost/assembly
+# view (FB_SHOW=1). The printable shells + STLs build fine without them
+# (FB_SHOW=0). See the README for where to download each model.
+*.step
+*.stp
+*.dwg
+*.pdf
+
+# ── Third-party libraries ─────────────────────────────────────────────
+# SensorLib (CST9217 touch / sensors) & XPowersLib (AXP2101) are pulled via
+# lib_deps in platformio.ini (pinned to a commit) instead of being committed —
+# they're large and unmodified. Kept locally for offline builds, not committed;
+# you can delete these local copies (lib_deps will re-fetch them).
+lib/SensorLib/
+lib/XPowersLib/
+# Arduino_GFX IS committed (it carries a required manifest-name patch so PlatformIO
+# can build it), but its bulky examples aren't needed:
+lib/Arduino_GFX/examples/
+
+# ── OS / editor cruft ─────────────────────────────────────────────────
+.DS_Store
+.vscode/
+
+# ── Local agent tooling & session state (personal, not part of the project)
+.claude/
+.codex
+.mcp.json
+.remember/
+.superpowers/
